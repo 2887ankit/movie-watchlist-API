@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pkl
+
+# Env / local
+.venv/
+.env
+.env.*
+movies.db
+data/
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docker
+*.log
