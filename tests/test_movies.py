@@ -2,7 +2,7 @@ import os
 from fastapi.testclient import TestClient
 from app.main import app
 
-# Ensure test DB is used
+
 os.environ["DATABASE_URL"] = "sqlite:///./test.db"
 
 def test_create_and_filter_movies():
