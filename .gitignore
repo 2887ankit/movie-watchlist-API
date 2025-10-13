@@ -24,3 +24,6 @@ htmlcov/
 
 # Docker
 *.log
+
+.venv/
+movies.db
