@@ -23,6 +23,7 @@ jobs:
     # Make tests use SQLite
     env:
       DATABASE_URL: sqlite:///./test.db
+      PYTHONPATH: src
 
     steps:
       - name: Checkout
