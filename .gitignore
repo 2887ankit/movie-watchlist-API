@@ -27,3 +27,4 @@ htmlcov/
 
 .venv/
 movies.db
+.DS_Store
