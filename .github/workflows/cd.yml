@@ -12,7 +12,7 @@ concurrency:
 
 env:
   TF_WORKING_DIR: terraform
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/movie-watchlist-api:latest
+  IMAGE_REFERENCE: ghcr.io/${{ github.repository_owner }}/movie-watchlist-api:latest
 
 jobs:
   deploy:
@@ -46,10 +46,26 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
           IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
-        run: terraform plan -input=false -no-color -var "image=${{ env.IMAGE_NAME }}"
+        run: terraform plan -input=false -no-color \
+            -var "image_reference=${{ env.IMAGE_REFERENCE }}" \
+            -out tfplan
+          terraform show -no-color tfplan > plan.txt
 
       - name: Terraform apply
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
           IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
-        run: terraform apply -input=false -auto-approve -var "image=${{ env.IMAGE_NAME }}"
+        run: terraform apply -input=false -auto-approve tfplan
+      - name: Show Terraform outputs (App URL)
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+            echo "## Terraform outputs" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            terraform output
+            APP_URL=$(terraform output -raw app_url || true)
+            if [ -n "$APP_URL" ]; then
+                echo "- **App URL:** [$APP_URL]($APP_URL)" >> "$GITHUB_STEP_SUMMARY"
+                echo "App URL: $APP_URL"
+            else
+                echo "- **App URL:** (none)" >> "$GITHUB_STEP_SUMMARY"
+            fi
