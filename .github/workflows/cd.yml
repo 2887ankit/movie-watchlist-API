@@ -13,18 +13,17 @@ concurrency:
 env:
   TF_WORKING_DIR: terraform
   IMAGE_REFERENCE: ghcr.io/${{ github.repository_owner }}/movie-watchlist-api:latest
-  RESOURCE_GROUP: Default                   
+  RESOURCE_GROUP: Default
 
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     environment:
-      name: prod                            
+      name: prod
+    
     permissions:
       contents: read
-      issues: write
-      pull-requests: write
 
     steps:
       - name: Checkout
@@ -35,96 +34,16 @@ jobs:
         with:
           terraform_version: 1.6.6
 
-      - name: Install IBM Cloud CLI & Code Engine plugin
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl
-          curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
-          ibmcloud plugin install code-engine -f
-
-      - name: Terraform init
+      
+      - name: Terraform init (IBM cloud remote state)
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
           IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
-        run: terraform init -input=false
-
-      - name: Import existing Code Engine project & app (idempotent)
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        env:
-            IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
-            REGION: eu-gb
-            RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
-            CE_PROJECT_NAME: movie-watchlist-project
-            APP_NAME: movie-watchlist
-            # Provide TF vars so Terraform won't prompt during import/provider init
-            TF_VAR_resource_group: ${{ env.RESOURCE_GROUP }}
-            TF_VAR_image_reference: ${{ env.IMAGE_REFERENCE }}
         run: |
-            set -euo pipefail
-
-            # Login + target
-            ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$REGION"
-            ibmcloud target -g "$RESOURCE_GROUP"
-            ibmcloud plugin install code-engine -f >/dev/null
-
-            # ----- Import PROJECT (needs UUID, not CRN) -----
-            PJSON=$(ibmcloud ce project get --name "$CE_PROJECT_NAME" --output json 2>/dev/null || true)
-            if [ -n "${PJSON:-}" ]; then
-            PUUID=$(printf '%s' "$PJSON" | jq -r '.project_id // .projectId // empty')
-            if [ -z "$PUUID" ]; then
-                # fallback: extract first UUID found
-                PUUID=$(printf '%s' "$PJSON" | grep -oE '[0-9a-fA-F-]{36}' | head -n1 || true)
-            fi
-            if [ -n "$PUUID" ]; then
-                echo "Using CE project UUID: $PUUID"
-                terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1 || \
-                terraform import -input=false ibm_code_engine_project.code_engine_project_instance "$PUUID"
-            else
-                echo "ERROR: Could not extract project UUID from CLI output"; echo "$PJSON"; exit 1
-            fi
-            else
-            echo "No existing project named '$CE_PROJECT_NAME' found. Terraform will create it."
-            fi
-
-            # Select project context for CE app commands
-            ibmcloud ce project select --name "$CE_PROJECT_NAME" >/dev/null
-
-            # ----- Import APP (try by UUID; fall back to project/name composite) -----
-            AJSON=$(ibmcloud ce app get --name "$APP_NAME" --output json 2>/dev/null || true)
-            if [ -n "${AJSON:-}" ]; then
-            AUUID=$(printf '%s' "$AJSON" | jq -r '.id // .app_id // empty')
-            if [ -z "$AUUID" ]; then
-                # fallback: extract first UUID found
-                AUUID=$(printf '%s' "$AJSON" | grep -oE '[0-9a-fA-F-]{36}' | head -n1 || true)
-            fi
-            if [ -n "$AUUID" ]; then
-                echo "Using CE app UUID: $AUUID"
-                terraform state show ibm_code_engine_app.code_engine_app_instance >/dev/null 2>&1 || \
-                terraform import -input=false ibm_code_engine_app.code_engine_app_instance "$AUUID" || true
-            else
-                echo "NOTE: Could not extract app UUID; will try composite import"
-                # Some provider versions accept "projectUUID/appName" as import id
-                if [ -n "${PUUID:-}" ]; then
-                terraform state show ibm_code_engine_app.code_engine_app_instance >/dev/null 2>&1 || \
-                    terraform import -input=false ibm_code_engine_app.code_engine_app_instance "${PUUID}/${APP_NAME}" || true
-                fi
-            fi
-            else
-            echo "No existing app named '$APP_NAME' found. Terraform will create it."
-            fi
-
-            echo "==== Terraform state after imports ===="
-            terraform state list || true
-
-            # Hard-fail if project exists but still not in state (prevents re-create)
-            if [ -n "${PJSON:-}" ] && ! terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1; then
-            echo "ERROR: Project import failed; aborting to avoid 'already exists' during apply."
-            exit 1
-            fi
-
-            # If app exists but still not in state, we still allow plan/apply to run:
-            # Terraform may then detect 'no-op' or we can handle drift later.
-
+          terraform init -input=false -no-color \
+            -backend-config="region=eu-gb" \
+            -backend-config="resource_group=${{ env.RESOURCE_GROUP }}" \
+            -backend-config="name=movie-watchlist-remote-state"
 
       - name: Terraform validate
         working-directory: ${{ env.TF_WORKING_DIR }}
@@ -163,14 +82,15 @@ jobs:
             echo "- **App URL:** (none)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # OWASP ZAP baseline DAST scan
+      # OWASP ZAP baseline DAST scan (no issue writing; low-noise target)
       - name: OWASP ZAP Baseline Scan
-        if: steps.show.outputs.url != ''    
+        if: steps.show.outputs.url != ''
         uses: zaproxy/action-baseline@v0.11.0
         with:
           target: ${{ steps.show.outputs.url }}/docs
-          cmd_options: '-a'                 
-        continue-on-error: true             
+          allow_issue_writing: false
+          cmd_options: '-a'
+        continue-on-error: true
 
       - name: Upload artifacts (plan & ZAP reports)
         uses: actions/upload-artifact@v4
