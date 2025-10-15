@@ -55,14 +55,17 @@ jobs:
           REGION: ${{ vars.REGION || 'eu-gb' }}
           CE_PROJECT_NAME: ${{ vars.PROJECT_NAME || 'movie-watchlist-project' }}
           RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
+          TF_VAR_resource_group: ${{ env.RESOURCE_GROUP }}
+          TF_VAR_image_reference: ${{ env.IMAGE_REFERENCE }}
         run: |
           ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$REGION"
           ibmcloud target -g "$RESOURCE_GROUP"
-          # Get the project id by name (empty if not found)
+          ibmcloud plugin install code-engine -f >/dev/null
+          
           PID=$(ibmcloud ce project get --name "$CE_PROJECT_NAME" --output json 2>/dev/null | jq -r '.id // empty')
           if [ -n "$PID" ]; then
             echo "Found Code Engine project ID: $PID"
-            # Import only if not already in state
+            
             terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1 || \
               terraform import ibm_code_engine_project.code_engine_project_instance "$PID" || true
           else
