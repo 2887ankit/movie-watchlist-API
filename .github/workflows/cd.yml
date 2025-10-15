@@ -62,12 +62,20 @@ jobs:
           ibmcloud target -g "$RESOURCE_GROUP"
           ibmcloud plugin install code-engine -f >/dev/null
           
-          PID=$(ibmcloud ce project get --name "$CE_PROJECT_NAME" --output json 2>/dev/null | jq -r '.id // empty')
+          PID=$(ibmcloud ce project get --name "$CE_PROJECT_NAME" --output json 2>/dev/null | jq -r '.project_id // empty')
           if [ -n "$PID" ]; then
-            echo "Found Code Engine project ID: $PID"
+            echo "Found Code Engine project UUID: $PID"
             
             terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1 || \
-              terraform import ibm_code_engine_project.code_engine_project_instance "$PID" || true
+              terraform import -input=false ibm_code_engine_project.code_engine_project_instance "$PID"
+            echo "==== Terraform state after import ===="
+            terraform state list || true
+
+            # Hard-fail if import still missing (prevents a create-attempt)
+            if ! terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1; then
+              echo "ERROR: Import failed; refusing to continue to avoid re-creating the project."
+              exit 1
+            fi
           else
             echo "No existing project named '$CE_PROJECT_NAME' found. Terraform will create it."
           fi
