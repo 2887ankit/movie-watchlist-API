@@ -30,6 +30,5 @@ def get_session():
 @asynccontextmanager
 async def lifespan(app):
     # Import models so their tables are registered on SQLModel.metadata
-    from . import models  
     SQLModel.metadata.create_all(engine)
     yield
