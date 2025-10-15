@@ -23,6 +23,8 @@ jobs:
       name: prod                            
     permissions:
       contents: read
+      issues: write
+      pull-requests: write
 
     steps:
       - name: Checkout
@@ -106,12 +108,12 @@ jobs:
 
       # OWASP ZAP baseline DAST scan
       - name: OWASP ZAP Baseline Scan
-        if: steps.show.outputs.url != ''    # only run if we have a URL
+        if: steps.show.outputs.url != ''    
         uses: zaproxy/action-baseline@v0.11.0
         with:
-          target: ${{ steps.show.outputs.url }}
-          cmd_options: '-a'                 # aggressive passive scan
-        continue-on-error: true             # don’t fail deploy on warnings
+          target: ${{ steps.show.outputs.url }}/docs
+          cmd_options: '-a'                 
+        continue-on-error: true             
 
       - name: Upload artifacts (plan & ZAP reports)
         uses: actions/upload-artifact@v4
@@ -121,3 +123,4 @@ jobs:
             terraform/plan.txt
             report_html.html
             report_json.json
+            report_md.md
