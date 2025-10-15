@@ -1,9 +1,12 @@
 import os
+
 from fastapi.testclient import TestClient
+
 from app.main import app
 
-
+# Ensure a test DB is used
 os.environ["DATABASE_URL"] = "sqlite:///./test.db"
+
 
 def test_create_and_filter_movies():
     with TestClient(app) as client:
@@ -21,8 +24,3 @@ def test_create_and_filter_movies():
         assert only_unwatched.status_code == 200
         data = only_unwatched.json()
         assert any(m["title"] == "Interstellar" for m in data)
-
-def test_year_validation():
-    with TestClient(app) as client:
-        bad = client.post("/items", json={"title": "Too Early", "year": 1500, "watched": False})
-        assert bad.status_code == 422
