@@ -33,11 +33,39 @@ jobs:
         with:
           terraform_version: 1.6.6
 
+      - name: Install IBM Cloud CLI & Code Engine plugin
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+          curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+          ibmcloud plugin install code-engine -f
+
       - name: Terraform init
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
           IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
         run: terraform init -input=false
+
+      - name: Import existing Code Engine project (idempotent)
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
+          REGION: ${{ vars.REGION || 'eu-gb' }}
+          CE_PROJECT_NAME: ${{ vars.PROJECT_NAME || 'movie-watchlist-project' }}
+          RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
+        run: |
+          ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$REGION"
+          ibmcloud target -g "$RESOURCE_GROUP"
+          # Get the project id by name (empty if not found)
+          PID=$(ibmcloud ce project get --name "$CE_PROJECT_NAME" --output json 2>/dev/null | jq -r '.id // empty')
+          if [ -n "$PID" ]; then
+            echo "Found Code Engine project ID: $PID"
+            # Import only if not already in state
+            terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1 || \
+              terraform import ibm_code_engine_project.code_engine_project_instance "$PID" || true
+          else
+            echo "No existing project named '$CE_PROJECT_NAME' found. Terraform will create it."
+          fi
 
       - name: Terraform validate
         working-directory: ${{ env.TF_WORKING_DIR }}
@@ -53,35 +81,6 @@ jobs:
             -var "image_reference=${{ env.IMAGE_REFERENCE }}" \
             -out tfplan
           terraform show -no-color tfplan > plan.txt
-
-      - name: Import existing Code Engine project (idempotent)
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        env:
-          IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
-          REGION: ${{ vars.REGION || 'eu-gb' }}
-          CE_PROJECT_NAME: ${{ vars.PROJECT_NAME || 'movie-watchlist-project' }}
-          RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
-        run: |
-          sudo apt-get update -y >/dev/null 2>&1 || true
-          sudo apt-get install -y -qq jq >/dev/null 2>&1 || true
-
-          ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$REGION"
-          ibmcloud target -g "$RESOURCE_GROUP"
-          ibmcloud plugin install code-engine -f >/dev/null
-
-          # Query the project ID by name
-          PID=$(ibmcloud ce project get --name "$CE_PROJECT_NAME" --output json 2>/dev/null | jq -r '.id // empty')
-
-          if [ -n "$PID" ]; then
-            echo "Found Code Engine project ID: $PID"
-            # Import only if not already in state
-            if ! terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1; then
-              terraform import ibm_code_engine_project.code_engine_project_instance "$PID" || true
-            fi
-          else
-            echo "No existing project named '$CE_PROJECT_NAME' found. Terraform will create it."
-          fi
-
 
       - name: Terraform apply
         working-directory: ${{ env.TF_WORKING_DIR }}
