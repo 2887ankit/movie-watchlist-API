@@ -113,7 +113,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           args: >
-            -Dsonar.projectKey=2887ankit
+            -Dsonar.projectKey=movie-watchlist-api
             -Dsonar.organization=movie-watchlist-sc
             -Dsonar.projectName="movie-watchlist-API"
             -Dsonar.python.version=3.12
