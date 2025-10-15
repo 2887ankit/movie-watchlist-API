@@ -51,34 +51,59 @@ jobs:
       - name: Import existing Code Engine project (idempotent)
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
-          IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
-          REGION: ${{ vars.REGION || 'eu-gb' }}
-          CE_PROJECT_NAME: ${{ vars.PROJECT_NAME || 'movie-watchlist-project' }}
-          RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
-          TF_VAR_resource_group: ${{ env.RESOURCE_GROUP }}
-          TF_VAR_image_reference: ${{ env.IMAGE_REFERENCE }}
+            IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
+            REGION: eu-gb
+            CE_PROJECT_NAME: movie-watchlist-project
+            RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
+            # Provide TF vars so Terraform won't prompt during import/provider init
+            TF_VAR_resource_group: ${{ env.RESOURCE_GROUP }}
+            TF_VAR_image_reference: ${{ env.IMAGE_REFERENCE }}
         run: |
-          ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$REGION"
-          ibmcloud target -g "$RESOURCE_GROUP"
-          ibmcloud plugin install code-engine -f >/dev/null
-          
-          PID=$(ibmcloud ce project get --name "$CE_PROJECT_NAME" --output json 2>/dev/null | jq -r '.project_id // empty')
-          if [ -n "$PID" ]; then
-            echo "Found Code Engine project UUID: $PID"
-            
-            terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1 || \
-              terraform import -input=false ibm_code_engine_project.code_engine_project_instance "$PID"
-            echo "==== Terraform state after import ===="
-            terraform state list || true
+            set -euo pipefail
 
-            # Hard-fail if import still missing (prevents a create-attempt)
-            if ! terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1; then
-              echo "ERROR: Import failed; refusing to continue to avoid re-creating the project."
-              exit 1
+            ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$REGION"
+            ibmcloud target -g "$RESOURCE_GROUP"
+            ibmcloud plugin install code-engine -f >/dev/null
+
+            # Get raw JSON once
+            JSON=$(ibmcloud ce project get --name "$CE_PROJECT_NAME" --output json 2>/dev/null || true)
+
+            if [ -n "${JSON:-}" ]; then
+            echo "Found project JSON."
+            # Try multiple fields; some CLIs return CRN in .id and UUID elsewhere.
+            RAW_ID=$(printf '%s' "$JSON" | jq -r '.project_id // .projectId // .id // empty')
+
+            # If we got a CRN in RAW_ID, extract the UUID from it; otherwise keep as-is.
+            UUID=$(printf '%s' "$RAW_ID" | grep -oE '[0-9a-fA-F-]{36}' || true)
+
+            if [ -z "$UUID" ]; then
+                # As a fallback, scan full JSON for a UUID anywhere
+                UUID=$(printf '%s' "$JSON" | grep -oE '[0-9a-fA-F-]{36}' | head -n1 || true)
             fi
-          else
+
+            if [ -n "$UUID" ]; then
+                echo "Using Code Engine project UUID: $UUID"
+                # Only import if not already in state
+                if ! terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1; then
+                terraform import -input=false ibm_code_engine_project.code_engine_project_instance "$UUID"
+                fi
+
+                echo "==== Terraform state after import ===="
+                terraform state list || true
+
+                if ! terraform state show ibm_code_engine_project.code_engine_project_instance >/dev/null 2>&1; then
+                echo "ERROR: Import failed (resource not found in state). Aborting to prevent re-create."
+                exit 1
+                fi
+            else
+                echo "ERROR: Could not extract a project UUID. Aborting."
+                echo "$JSON"
+                exit 1
+            fi
+            else
             echo "No existing project named '$CE_PROJECT_NAME' found. Terraform will create it."
-          fi
+            fi
+
 
       - name: Terraform validate
         working-directory: ${{ env.TF_WORKING_DIR }}
