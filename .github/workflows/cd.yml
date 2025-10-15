@@ -13,13 +13,14 @@ concurrency:
 env:
   TF_WORKING_DIR: terraform
   IMAGE_REFERENCE: ghcr.io/${{ github.repository_owner }}/movie-watchlist-api:latest
+  RESOURCE_GROUP: Default                   
 
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     environment:
-      name: prod               
+      name: prod                            
     permissions:
       contents: read
 
@@ -48,6 +49,7 @@ jobs:
           IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
         run: |
           terraform plan -input=false -no-color \
+            -var "resource_group=${{ env.RESOURCE_GROUP }}" \
             -var "image_reference=${{ env.IMAGE_REFERENCE }}" \
             -out tfplan
           terraform show -no-color tfplan > plan.txt
@@ -57,16 +59,37 @@ jobs:
         env:
           IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
         run: terraform apply -input=false -auto-approve tfplan
+
       - name: Show Terraform outputs (App URL)
+        id: show
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-            echo "## Terraform outputs" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            terraform output
-            APP_URL=$(terraform output -raw app_url || true)
-            if [ -n "$APP_URL" ]; then
-                echo "- **App URL:** [$APP_URL]($APP_URL)" >> "$GITHUB_STEP_SUMMARY"
-                echo "App URL: $APP_URL"
-            else
-                echo "- **App URL:** (none)" >> "$GITHUB_STEP_SUMMARY"
-            fi
+          echo "## Terraform outputs" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          terraform output
+          APP_URL=$(terraform output -raw app_url || true)
+          echo "url=$APP_URL" >> "$GITHUB_OUTPUT"
+          if [ -n "$APP_URL" ]; then
+            echo "- **App URL:** [$APP_URL]($APP_URL)" >> "$GITHUB_STEP_SUMMARY"
+            echo "App URL: $APP_URL"
+          else
+            echo "- **App URL:** (none)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # OWASP ZAP baseline DAST scan
+      - name: OWASP ZAP Baseline Scan
+        if: steps.show.outputs.url != ''    # only run if we have a URL
+        uses: zaproxy/action-baseline@v0.11.0
+        with:
+          target: ${{ steps.show.outputs.url }}
+          cmd_options: '-a'                 # aggressive passive scan
+        continue-on-error: true             # don’t fail deploy on warnings
+
+      - name: Upload artifacts (plan & ZAP reports)
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-artifacts-${{ github.sha }}
+          path: |
+            terraform/plan.txt
+            report_html.html
+            report_json.json

@@ -51,13 +51,13 @@ variable "scale_memory_limit" {
 variable "scale_min_instances" {
   description = "The minimum number of instances for this app.  If you set this value to 0, the app will scale down to zero, if not hit by any request for some time.)"
   type        = number
-  default     = 0
+  default     = 1
 }
 
 variable "scale_max_instances" {
   description = "The maximum number of instances for this app."
   type        = number
-  default     = 1
+  default     = 2
 }
 
 variable "database_url" {
