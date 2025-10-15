@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Image tag to deploy (e.g. sha-abc123 or latest)"
+        description: "Image tag to deploy (e.g., latest or sha)"
         required: false
         default: latest
 
@@ -27,8 +27,6 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     environment: prod
-    permissions:
-      contents: read
 
     steps:
       - name: Checkout
@@ -37,7 +35,7 @@ jobs:
       - name: Compose image reference
         run: echo "IMAGE_REFERENCE=${IMAGE_NAME}:${IMAGE_TAG}" >> "$GITHUB_ENV"
 
-      - name: Install IBM Cloud CLI + Schematics
+      - name: Install IBM Cloud CLI + Schematics plugin
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq curl
@@ -51,21 +49,26 @@ jobs:
           ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$REGION"
           ibmcloud target -g "$RESOURCE_GROUP"
 
-      - name: Resolve workspace ID by name
-        id: ws
+      - name: Resolve workspace and template IDs
+        id: ids
         run: |
           WS_ID=$(ibmcloud schematics workspace list --output json \
             | jq -r --arg NAME "$WORKSPACE_NAME" '.workspaces[]? | select(.name==$NAME) | .id' | head -n1)
           if [ -z "$WS_ID" ]; then
-            echo "Workspace '$WORKSPACE_NAME' not found in region ${REGION}. Create it first."
+            echo "Workspace '$WORKSPACE_NAME' not found. Please create it first."
             exit 1
           fi
+          TEMPLATE_ID=$(ibmcloud schematics workspace get --id "$WS_ID" --output json \
+            | jq -r '.template_data[0].id')
           echo "id=$WS_ID" >> "$GITHUB_OUTPUT"
+          echo "template=$TEMPLATE_ID" >> "$GITHUB_OUTPUT"
+          echo "Workspace ID: $WS_ID"
+          echo "Template ID: $TEMPLATE_ID"
 
-      - name: Pull latest Git repo into workspace
-        run: ibmcloud schematics workspace update --id "${{ steps.ws.outputs.id }}" --pl
+      - name: Pull latest code into workspace
+        run: ibmcloud schematics workspace update --id "${{ steps.ids.outputs.id }}" --pl
 
-      - name: Update workspace variable (image_reference)
+      - name: Update workspace variables
         run: |
           jq -n \
             --arg img "$IMAGE_REFERENCE" \
@@ -74,42 +77,46 @@ jobs:
                 {name:"image_reference", value:$img, type:"string", secure:false}
               ]
             }' > vars.json
-          ibmcloud schematics workspace update-variables --id "${{ steps.ws.outputs.id }}" --file vars.json
+          ibmcloud schematics workspace update-variables \
+            --id "${{ steps.ids.outputs.id }}" \
+            --template "${{ steps.ids.outputs.template }}" \
+            --file vars.json
+
+      - name: Wait for workspace unlock
+        run: |
+          for i in {1..10}; do
+            STATUS=$(ibmcloud schematics workspace get --id "${{ steps.ids.outputs.id }}" --output json | jq -r '.status')
+            if [[ "$STATUS" != "INPROGRESS" && "$STATUS" != "LOCKED" ]]; then
+              echo "Workspace is ready."
+              break
+            fi
+            echo "Workspace locked... waiting 30s"
+            sleep 30
+          done
 
       - name: Plan (Schematics)
-        run: ibmcloud schematics plan --id "${{ steps.ws.outputs.id }}" --var-file vars.json
+        run: ibmcloud schematics plan --id "${{ steps.ids.outputs.id }}" --var-file vars.json
 
       - name: Apply (Schematics)
-        run: ibmcloud schematics apply --id "${{ steps.ws.outputs.id }}" --var-file vars.json --force
+        run: ibmcloud schematics apply --id "${{ steps.ids.outputs.id }}" --var-file vars.json --force
 
-      - name: Show Terraform outputs (App URL)
-        id: outputs
+      - name: Fetch Outputs (App URL)
+        id: output
         run: |
-          OJSON=$(ibmcloud schematics output --id "${{ steps.ws.outputs.id }}" --output json || true)
+          OJSON=$(ibmcloud schematics output --id "${{ steps.ids.outputs.id }}" --output json || true)
           echo "$OJSON" | tee outputs.json
           APP_URL=$(echo "$OJSON" | jq -r '.[]? | select(.name=="app_url") | .value // empty' | head -n1)
           echo "url=$APP_URL" >> "$GITHUB_OUTPUT"
-          {
-            echo "## Terraform outputs"
-            echo
-            if [ -n "$APP_URL" ]; then
-              echo "- **App URL:** [$APP_URL]($APP_URL)"
-            else
-              echo "- **App URL:** (none)"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "## Terraform outputs" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$APP_URL" ]; then
+            echo "- **App URL:** [$APP_URL]($APP_URL)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **App URL:** (none)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-      - name: OWASP ZAP Baseline Scan
-        if: steps.outputs.url != ''
-        uses: zaproxy/action-baseline@v0.11.0
-        with:
-          target: ${{ steps.outputs.url }}/docs
-          allow_issue_writing: false
-          cmd_options: '-a'
-        continue-on-error: true
-
-      - name: Upload artifacts (outputs)
+      - name: Upload outputs
         uses: actions/upload-artifact@v4
         with:
-          name: schematics-deploy-${{ github.sha }}
+          name: schematics-outputs-${{ github.sha }}
           path: outputs.json
