@@ -1,12 +1,6 @@
 terraform {
   required_version = ">= 1.6.0"
 
-  backend "ibm" {
-    region         = "eu-gb"
-    resource_group = "Default"
-    name           = "movie-watchlist-remote-state"
-  }
-
   required_providers {
     ibm = {
       source = "IBM-Cloud/ibm"

@@ -1,27 +1,32 @@
-name: CD
+name: CD (Schematics)
 
 on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (e.g. sha-abc123 or latest)"
+        required: false
+        default: latest
 
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  TF_WORKING_DIR: terraform
-  IMAGE_REFERENCE: ghcr.io/${{ github.repository_owner }}/movie-watchlist-api:latest
+  REGION: eu-gb
   RESOURCE_GROUP: Default
+  WORKSPACE_NAME: movie-watchlist-ws
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/movie-watchlist-api
+  IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
 
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    environment:
-      name: prod
-    
+    environment: prod
     permissions:
       contents: read
 
@@ -29,75 +34,85 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.6.6
+      # Compose IMAGE_REFERENCE now that env is available
+      - name: Compose image reference
+        run: echo "IMAGE_REFERENCE=${IMAGE_NAME}:${IMAGE_TAG}" >> "$GITHUB_ENV"
 
-      
-      - name: Terraform init (IBM cloud remote state)
-        working-directory: ${{ env.TF_WORKING_DIR }}
+      - name: Install IBM Cloud CLI + Schematics
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+          curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+          ibmcloud plugin install schematics -f
+
+      - name: IBM Cloud login & target
         env:
           IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
         run: |
-          terraform init -input=false -no-color \
-            -backend-config="region=eu-gb" \
-            -backend-config="resource_group=${{ env.RESOURCE_GROUP }}" \
-            -backend-config="name=movie-watchlist-remote-state"
+          ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$REGION"
+          ibmcloud target -g "$RESOURCE_GROUP"
 
-      - name: Terraform validate
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform validate
-
-      - name: Terraform plan
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        env:
-          IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
+      - name: Resolve workspace ID by name
+        id: ws
         run: |
-          terraform plan -input=false -no-color \
-            -var "resource_group=${{ env.RESOURCE_GROUP }}" \
-            -var "image_reference=${{ env.IMAGE_REFERENCE }}" \
-            -out tfplan
-          terraform show -no-color tfplan > plan.txt
+          WS_ID=$(ibmcloud schematics workspace list --output json \
+            | jq -r --arg NAME "$WORKSPACE_NAME" '.workspaces[]? | select(.name==$NAME) | .id' | head -n1)
+          if [ -z "$WS_ID" ]; then
+            echo "Workspace '$WORKSPACE_NAME' not found in region ${REGION}. Create it first."
+            exit 1
+          fi
+          echo "id=$WS_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Terraform apply
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        env:
-          IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
-        run: terraform apply -input=false -auto-approve tfplan
+      - name: Pull latest repo into workspace
+        run: ibmcloud schematics workspace update --id "${{ steps.ws.outputs.id }}" --pull-latest --no-prompt
+
+      - name: Update workspace variable (image_reference)
+        run: |
+          jq -n \
+            --arg name "$WORKSPACE_NAME" \
+            --arg img "$IMAGE_REFERENCE" \
+            '{
+              name: $name,
+              variablestore: [
+                {name:"image_reference", value:$img, type:"string", secure:false}
+              ]
+            }' > vars.json
+          ibmcloud schematics workspace update --id "${{ steps.ws.outputs.id }}" --file vars.json --no-prompt
+
+      - name: Plan (Schematics)
+        run: ibmcloud schematics plan --id "${{ steps.ws.outputs.id }}" --no-prompt
+
+      - name: Apply (Schematics)
+        run: ibmcloud schematics apply --id "${{ steps.ws.outputs.id }}" --no-prompt
 
       - name: Show Terraform outputs (App URL)
-        id: show
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        id: outputs
         run: |
-          echo "## Terraform outputs" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          terraform output
-          APP_URL=$(terraform output -raw app_url || true)
+          OJSON=$(ibmcloud schematics output --id "${{ steps.ws.outputs.id }}" --output json || true)
+          echo "$OJSON" | tee outputs.json
+          APP_URL=$(echo "$OJSON" | jq -r '.[]? | select(.name=="app_url") | .value // empty' | head -n1)
           echo "url=$APP_URL" >> "$GITHUB_OUTPUT"
-          if [ -n "$APP_URL" ]; then
-            echo "- **App URL:** [$APP_URL]($APP_URL)" >> "$GITHUB_STEP_SUMMARY"
-            echo "App URL: $APP_URL"
-          else
-            echo "- **App URL:** (none)" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo "## Terraform outputs"
+            echo
+            if [ -n "$APP_URL" ]; then
+              echo "- **App URL:** [$APP_URL]($APP_URL)"
+            else
+              echo "- **App URL:** (none)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # OWASP ZAP baseline DAST scan (no issue writing; low-noise target)
       - name: OWASP ZAP Baseline Scan
-        if: steps.show.outputs.url != ''
+        if: steps.outputs.url != ''
         uses: zaproxy/action-baseline@v0.11.0
         with:
-          target: ${{ steps.show.outputs.url }}/docs
+          target: ${{ steps.outputs.url }}/docs
           allow_issue_writing: false
           cmd_options: '-a'
         continue-on-error: true
 
-      - name: Upload artifacts (plan & ZAP reports)
+      - name: Upload artifacts (outputs)
         uses: actions/upload-artifact@v4
         with:
-          name: deploy-artifacts-${{ github.sha }}
-          path: |
-            terraform/plan.txt
-            report_html.html
-            report_json.json
-            report_md.md
+          name: schematics-deploy-${{ github.sha }}
+          path: outputs.json
