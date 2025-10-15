@@ -42,6 +42,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest "fastapi[standard]"
+          pip install ruff mypy pytest coverage
 
       # ---------- Ruff (lint + format check) ----------
       - name: Ruff (lint)
