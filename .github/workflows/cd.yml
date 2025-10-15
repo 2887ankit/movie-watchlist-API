@@ -34,7 +34,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Compose IMAGE_REFERENCE now that env is available
       - name: Compose image reference
         run: echo "IMAGE_REFERENCE=${IMAGE_NAME}:${IMAGE_TAG}" >> "$GITHUB_ENV"
 
@@ -63,27 +62,25 @@ jobs:
           fi
           echo "id=$WS_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Pull latest repo into workspace
-        run: ibmcloud schematics workspace update --id "${{ steps.ws.outputs.id }}" --pull-latest --no-prompt
+      - name: Pull latest Git repo into workspace
+        run: ibmcloud schematics workspace update --id "${{ steps.ws.outputs.id }}" --pl
 
       - name: Update workspace variable (image_reference)
         run: |
           jq -n \
-            --arg name "$WORKSPACE_NAME" \
             --arg img "$IMAGE_REFERENCE" \
             '{
-              name: $name,
               variablestore: [
                 {name:"image_reference", value:$img, type:"string", secure:false}
               ]
             }' > vars.json
-          ibmcloud schematics workspace update --id "${{ steps.ws.outputs.id }}" --file vars.json --no-prompt
+          ibmcloud schematics workspace update-variables --id "${{ steps.ws.outputs.id }}" --file vars.json
 
       - name: Plan (Schematics)
-        run: ibmcloud schematics plan --id "${{ steps.ws.outputs.id }}" --no-prompt
+        run: ibmcloud schematics plan --id "${{ steps.ws.outputs.id }}" --var-file vars.json
 
       - name: Apply (Schematics)
-        run: ibmcloud schematics apply --id "${{ steps.ws.outputs.id }}" --no-prompt
+        run: ibmcloud schematics apply --id "${{ steps.ws.outputs.id }}" --var-file vars.json --force
 
       - name: Show Terraform outputs (App URL)
         id: outputs
