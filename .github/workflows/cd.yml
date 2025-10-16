@@ -69,31 +69,28 @@ jobs:
       - name: Pull latest repo into workspace
         run: ibmcloud schematics workspace update --id "${{ steps.ids.outputs.id }}" --pl
 
-      # ---------- Wait helpers ----------
-      - name: Wait until workspace unlocked (function)
-        id: wait_fn
+      # ------- helpers --------
+      - name: Create helper (wait until workspace is unlocked)
         run: |
           cat > wait_ws.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
           WS_ID="$1"
           LABEL="$2"
-          echo " Waiting for workspace unlock before: $LABEL"
-          for i in {1..12}; do
+          # wait up to ~5 minutes
+          for i in {1..20}; do
             STATUS=$(ibmcloud schematics workspace get --id "$WS_ID" --output json | jq -r '.status')
-            echo "Status: $STATUS"
+            echo "[$LABEL] Status: $STATUS"
             case "$STATUS" in
-              ACTIVE|DRAFT|INACTIVE) echo "✅ Workspace ready for: $LABEL"; exit 0 ;;
-              *) echo " Locked... sleeping 15s"; sleep 15 ;;
+              ACTIVE|DRAFT|INACTIVE) exit 0 ;;
+              *) sleep 15 ;;
             esac
           done
-          echo " Timeout waiting for workspace unlock: $LABEL"
-          exit 1
+          echo "Timed out waiting for workspace unlock ($LABEL)"; exit 1
           EOF
           chmod +x wait_ws.sh
 
-      # ---------- Update variables with retry ----------
-      - name: Prepare variable file
+      - name: Prepare vars.json
         run: |
           jq -n \
             --arg img "$IMAGE_REFERENCE" \
@@ -104,39 +101,51 @@ jobs:
             }' > vars.json
           cat vars.json
 
-      - name: Wait for unlock (pre-update-variables)
+      - name: Wait (before update-variables)
         run: ./wait_ws.sh "${{ steps.ids.outputs.id }}" "update-variables"
 
-      - name: Update workspace variables (retry on 409)
+      - name: Update workspace variables (retry 409/500)
         run: |
           for i in {1..6}; do
             if ibmcloud schematics workspace update-variables \
               --id "${{ steps.ids.outputs.id }}" \
               --template "${{ steps.ids.outputs.template }}" \
               --file vars.json; then
-              echo "✅ Variables updated."
-              exit 0
+              echo "Variables updated."; exit 0
             fi
-            echo "⚠️ update-variables failed (likely 409 lock). Retry $i/6 in 20s..."
+            echo "update-variables failed; retry $i/6 in 20s..."
             sleep 20
           done
-          echo " Failed to update variables after retries."
-          exit 1
+          echo "Could not update variables after retries."; exit 1
 
-      # ---------- Plan + Apply with unlock waits ----------
-      - name: Wait for unlock (pre-plan)
+      - name: Wait (before plan)
         run: ./wait_ws.sh "${{ steps.ids.outputs.id }}" "plan"
 
-      - name: Plan (Schematics)
-        run: ibmcloud schematics plan --id "${{ steps.ids.outputs.id }}" --var-file vars.json
+      - name: Plan (retry transient 500s)
+        run: |
+          for i in {1..5}; do
+            if ibmcloud schematics plan --id "${{ steps.ids.outputs.id }}" --var-file vars.json; then
+              exit 0
+            fi
+            echo "Plan failed; retry $i/5 in 60s..."
+            sleep 60
+          done
+          echo "Plan failed after retries."; exit 1
 
-      - name: Wait for unlock (pre-apply)
+      - name: Wait (before apply)
         run: ./wait_ws.sh "${{ steps.ids.outputs.id }}" "apply"
 
-      - name: Apply (Schematics)
-        run: ibmcloud schematics apply --id "${{ steps.ids.outputs.id }}" --var-file vars.json --force
+      - name: Apply (retry transient 500s)
+        run: |
+          for i in {1..5}; do
+            if ibmcloud schematics apply --id "${{ steps.ids.outputs.id }}" --var-file vars.json --force; then
+              exit 0
+            fi
+            echo "Apply failed; retry $i/5 in 60s..."
+            sleep 60
+          done
+          echo "Apply failed after retries."; exit 1
 
-      # ---------- Outputs ----------
       - name: Fetch outputs (App URL)
         id: outputs
         run: |
@@ -160,9 +169,8 @@ jobs:
           name: schematics-outputs-${{ github.sha }}
           path: outputs.json
 
-      
       - name: OWASP ZAP Baseline Scan
-        if: steps.outputs.outputs.url != ''
+        if: ${{ steps.outputs.outputs.url != '' }}
         uses: zaproxy/action-baseline@v0.11.0
         with:
           target: ${{ steps.outputs.outputs.url }}/docs
