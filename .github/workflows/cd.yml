@@ -112,7 +112,7 @@ jobs:
               --id "${{ steps.ids.outputs.id }}" \
               --template "${{ steps.ids.outputs.template }}" \
               --file vars.json; then
-              echo "✅ Variables updated."
+              echo "Variables updated."
               exit 0
             fi
             echo "update-variables failed (likely 409 lock). Retry $i/6 in 20s..."
@@ -132,7 +132,7 @@ jobs:
           WS_ID="${{ steps.ids.outputs.id }}"
           PLAN_OK=false
           # backoff: 30s, 60s, 90s, 120s, 150s, 180s, 210s, 240s
-          for i in 1 2 3 4 5 6 7 8; do
+          for i in 1 2 3 4; do
             echo "Attempt $i: schematics plan..."
             if ibmcloud schematics plan --id "$WS_ID" --var-file vars.json; then
               PLAN_OK=true
@@ -178,7 +178,7 @@ jobs:
           ibmcloud plugin install code-engine -f >/dev/null
           ibmcloud ce project select --name "$CE_PROJECT_NAME"
           ibmcloud ce app update --name "$APP_NAME" --image "${IMAGE_REFERENCE}"
-          echo "✅ Fallback deploy completed."
+          echo "Fallback deploy completed."
 
       # ---------- Outputs ----------
       - name: Fetch outputs (App URL)

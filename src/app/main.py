@@ -4,7 +4,7 @@ from sqlmodel import Session, select
 from .db import get_session, lifespan
 from .models import Movie, MovieCreate
 
-app = FastAPI(title="Movie Watchlist", lifespan=lifespan)
+app = FastAPI(title="Movie Watchlist V1", lifespan=lifespan)
 
 
 @app.get("/health")
