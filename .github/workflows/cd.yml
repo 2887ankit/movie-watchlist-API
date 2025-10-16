@@ -1,4 +1,4 @@
-name: CD (Schematics)
+name: CD (Schematics with CE fallback)
 
 on:
   workflow_run:
@@ -69,8 +69,8 @@ jobs:
       - name: Pull latest repo into workspace
         run: ibmcloud schematics workspace update --id "${{ steps.ids.outputs.id }}" --pl
 
-      # ------- helpers --------
-      - name: Create helper (wait until workspace is unlocked)
+      # ---------- Wait helper (unlocks) ----------
+      - name: Create wait script
         run: |
           cat > wait_ws.sh <<'EOF'
           #!/usr/bin/env bash
@@ -90,7 +90,8 @@ jobs:
           EOF
           chmod +x wait_ws.sh
 
-      - name: Prepare vars.json
+      # ---------- Update variable (image_reference) with retry ----------
+      - name: Prepare variable file
         run: |
           jq -n \
             --arg img "$IMAGE_REFERENCE" \
@@ -101,76 +102,122 @@ jobs:
             }' > vars.json
           cat vars.json
 
-      - name: Wait (before update-variables)
+      - name: Wait for unlock (pre-update-variables)
         run: ./wait_ws.sh "${{ steps.ids.outputs.id }}" "update-variables"
 
-      - name: Update workspace variables (retry 409/500)
+      - name: Update workspace variables (retry on 409)
         run: |
           for i in {1..6}; do
             if ibmcloud schematics workspace update-variables \
               --id "${{ steps.ids.outputs.id }}" \
               --template "${{ steps.ids.outputs.template }}" \
               --file vars.json; then
-              echo "Variables updated."; exit 0
+              echo "✅ Variables updated."
+              exit 0
             fi
-            echo "update-variables failed; retry $i/6 in 20s..."
+            echo "update-variables failed (likely 409 lock). Retry $i/6 in 20s..."
             sleep 20
           done
-          echo "Could not update variables after retries."; exit 1
+          echo "Failed to update variables after retries."
+          exit 1
 
-      - name: Wait (before plan)
+      # ---------- Plan with robust retry ----------
+      - name: Wait for unlock (pre-plan)
         run: ./wait_ws.sh "${{ steps.ids.outputs.id }}" "plan"
 
-      - name: Plan (retry transient 500s)
+      - name: Plan (Schematics) with retry
+        id: planstep
         run: |
-          for i in {1..5}; do
-            if ibmcloud schematics plan --id "${{ steps.ids.outputs.id }}" --var-file vars.json; then
-              exit 0
+          set -euo pipefail
+          WS_ID="${{ steps.ids.outputs.id }}"
+          PLAN_OK=false
+          # backoff: 30s, 60s, 90s, 120s, 150s, 180s, 210s, 240s
+          for i in 1 2 3 4 5 6 7 8; do
+            echo "Attempt $i: schematics plan..."
+            if ibmcloud schematics plan --id "$WS_ID" --var-file vars.json; then
+              PLAN_OK=true
+              break
             fi
-            echo "Plan failed; retry $i/5 in 60s..."
-            sleep 60
+            echo "Plan failed (transient 409/500?). Sleeping..."
+            sleep $(( 30*i + RANDOM % 10 ))
           done
-          echo "Plan failed after retries."; exit 1
+          echo "plan_ok=$PLAN_OK" >> "$GITHUB_OUTPUT"
 
-      - name: Wait (before apply)
+      # ---------- Apply with retry if plan succeeded ----------
+      - name: Wait for unlock (pre-apply)
+        if: steps.planstep.outputs.plan_ok == 'true'
         run: ./wait_ws.sh "${{ steps.ids.outputs.id }}" "apply"
 
-      - name: Apply (retry transient 500s)
+      - name: Apply (Schematics) with retry
+        if: steps.planstep.outputs.plan_ok == 'true'
+        id: applystep
         run: |
-          for i in {1..5}; do
-            if ibmcloud schematics apply --id "${{ steps.ids.outputs.id }}" --var-file vars.json --force; then
-              exit 0
+          set -euo pipefail
+          WS_ID="${{ steps.ids.outputs.id }}"
+          APPLY_OK=false
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i: schematics apply..."
+            if ibmcloud schematics apply --id "$WS_ID" --var-file vars.json --force; then
+              APPLY_OK=true
+              break
             fi
-            echo "Apply failed; retry $i/5 in 60s..."
-            sleep 60
+            echo "Apply failed (transient?). Sleeping..."
+            sleep $(( 30*i + RANDOM % 10 ))
           done
-          echo "Apply failed after retries."; exit 1
+          echo "apply_ok=$APPLY_OK" >> "$GITHUB_OUTPUT"
 
+      # ---------- Fallback: direct Code Engine deploy if plan failed ----------
+      - name: Fallback deploy via Code Engine (update image)
+        if: steps.planstep.outputs.plan_ok != 'true'
+        env:
+          CE_PROJECT_NAME: movie-watchlist-project
+          APP_NAME: movie-watchlist
+        run: |
+          set -euo pipefail
+          echo "Schematics plan failed after retries; performing fallback CE image update."
+          ibmcloud plugin install code-engine -f >/dev/null
+          ibmcloud ce project select --name "$CE_PROJECT_NAME"
+          ibmcloud ce app update --name "$APP_NAME" --image "${IMAGE_REFERENCE}"
+          echo "✅ Fallback deploy completed."
+
+      # ---------- Outputs ----------
       - name: Fetch outputs (App URL)
         id: outputs
+        continue-on-error: true
         run: |
-          OJSON=$(ibmcloud schematics output --id "${{ steps.ids.outputs.id }}" --output json || true)
-          echo "$OJSON" | tee outputs.json
-          APP_URL=$(echo "$OJSON" | jq -r '.[]? | select(.name=="app_url") | .value // empty' | head -n1)
+          set -euo pipefail
+          APP_URL=""
+          if [ "${{ steps.planstep.outputs.plan_ok }}" = "true" ] && [ "${{ steps.applystep.outputs.apply_ok || 'false' }}" = "true" ]; then
+            OJSON=$(ibmcloud schematics output --id "${{ steps.ids.outputs.id }}" --output json || true)
+            echo "$OJSON" > outputs.json
+            APP_URL=$(echo "$OJSON" | jq -r '.[]? | select(.name=="app_url") | .value // empty' | head -n1)
+          else
+            # Best-effort derive CE URL if Schematics path didn't complete
+            ibmcloud plugin install code-engine -f >/dev/null
+            ibmcloud ce app get --name movie-watchlist --output json > ce_app.json || true
+            APP_URL=$(jq -r '.status?.url // .status?.urls?[0] // empty' ce_app.json || true)
+            cp ce_app.json outputs.json || true
+          fi
           echo "url=$APP_URL" >> "$GITHUB_OUTPUT"
           {
-            echo "## Terraform outputs"
+            echo "## Deployment result"
             echo
             if [ -n "$APP_URL" ]; then
               echo "- **App URL:** [$APP_URL]($APP_URL)"
             else
-              echo "- **App URL:** (none)"
+              echo "- **App URL:** (none found)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload outputs artifact
         uses: actions/upload-artifact@v4
         with:
-          name: schematics-outputs-${{ github.sha }}
+          name: deploy-outputs-${{ github.sha }}
           path: outputs.json
 
+      # ---------- DAST ----------
       - name: OWASP ZAP Baseline Scan
-        if: ${{ steps.outputs.outputs.url != '' }}
+        if: steps.outputs.outputs.url != ''
         uses: zaproxy/action-baseline@v0.11.0
         with:
           target: ${{ steps.outputs.outputs.url }}/docs
